@@ -11,9 +11,9 @@ using Raven.Json.Linq;
 using ServiceStack.Text;
 
 namespace Raven.NotYetReplicatedExporter
-{
+{	
 	public class DocumentInfoRow
-	{
+	{		
 		public string Id { get; set; }
 
 		public string Etag { get; set; }
@@ -69,42 +69,38 @@ namespace Raven.NotYetReplicatedExporter
 
 					var lastDocEtag = store.DatabaseCommands.GetStatistics().LastDocEtag;
 					var replicationStats = store.DatabaseCommands.Info.GetReplicationInfo();
-					foreach (var destStats in replicationStats.Stats)
+					using (var sw = new StreamWriter($"Not-yet-replicated-at-{store.DefaultDatabase}.csv", false))
 					{
-						if (EtagUtil.IsGreaterThan(destStats.LastReplicatedEtag, lastDocEtag))
-							continue;
-						using (var session = store.OpenSession())
-						using (var unReplicatedDocsStream = session.Advanced.Stream<dynamic>(destStats.LastReplicatedEtag))
+						foreach (var destStats in replicationStats.Stats)
 						{
-							while (unReplicatedDocsStream.MoveNext())
+							if (EtagUtil.IsGreaterThan(destStats.LastReplicatedEtag, lastDocEtag))
+								continue;
+							using (var session = store.OpenSession())
+							using (var unReplicatedDocsStream = session.Advanced.Stream<dynamic>(destStats.LastReplicatedEtag))
 							{
-								if(unReplicatedDocsStream.Current.Key.StartsWith("Raven/") ||
-									unReplicatedDocsStream.Current == null) //precaution
-									continue;
-								
-								var entityName = string.Empty;
-								RavenJToken val;
-								if (unReplicatedDocsStream.Current.Metadata.TryGetValue(Constants.RavenEntityName, out val))
-									entityName = val.Value<string>();
-
-								unreplicatedDocs.Add(new DocumentInfoRow
+								while (unReplicatedDocsStream.MoveNext())
 								{
-									Id = unReplicatedDocsStream.Current.Key,
-									Etag = unReplicatedDocsStream.Current.Etag.ToString(),
-									EntityName = entityName,
-									DestinationUrl = destStats.Url
-								});
-								Console.WriteLine($"Doc Id = {unReplicatedDocsStream.Current.Key}, Destination = {destStats.Url}");
+									if (unReplicatedDocsStream.Current.Key.StartsWith("Raven/") ||
+									    unReplicatedDocsStream.Current == null) //precaution
+										continue;
+
+									var entityName = string.Empty;
+									RavenJToken val;
+									if (unReplicatedDocsStream.Current.Metadata.TryGetValue(Constants.RavenEntityName, out val))
+										entityName = val.Value<string>();									
+									unreplicatedDocs.Add(new DocumentInfoRow
+									{
+										Id = unReplicatedDocsStream.Current.Key,
+										Etag = unReplicatedDocsStream.Current.Etag.ToString(),
+										EntityName = entityName,
+										DestinationUrl = destStats.Url
+									});
+									Console.WriteLine($"Doc Id = {unReplicatedDocsStream.Current.Key}, Destination = {destStats.Url}");
+								}
 							}
 						}
-					}
 
-					Console.Clear();
-					Console.WriteLine($"Writing exported data to {store.DefaultDatabase}.csv");
-					using (var sw = new StreamWriter($"{store.DefaultDatabase}.csv", false))
-					{
-						foreach (var row in unreplicatedDocs)
-							CsvSerializer.SerializeToWriter(row, sw);
+						CsvWriter<DocumentInfoRow>.Write(sw, unreplicatedDocs);
 						sw.Flush();
 					}
 				}
