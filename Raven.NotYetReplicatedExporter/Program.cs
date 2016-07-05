@@ -31,6 +31,7 @@ namespace Raven.NotYetReplicatedExporter
 			{
 				Console.WriteLine("Exporter of not-yet-exported documents in RavenDB");
 				Console.WriteLine("Usage : Raven.NotYetReplicatedExporter.exe [database url] [database name]");
+				return;
 			}
 
 			if (String.IsNullOrWhiteSpace(args[0]))
@@ -55,49 +56,62 @@ namespace Raven.NotYetReplicatedExporter
 				return;
 			}
 
-			using (var store = new DocumentStore
+			try
 			{
-				DefaultDatabase = args[1],
-				Url = args[0]
-			})
-			{
-				store.Initialize();
-				var unreplicatedDocs = new List<DocumentInfoRow>();
-
-				var lastDocEtag = store.DatabaseCommands.GetStatistics().LastDocEtag;
-				var replicationStats = store.DatabaseCommands.Info.GetReplicationInfo();
-				foreach (var destStats in replicationStats.Stats)
+				using (var store = new DocumentStore
 				{
-					if (EtagUtil.IsGreaterThan(lastDocEtag, destStats.LastReplicatedEtag))
-						continue;
-					using (var session = store.OpenSession())
-					using (var unReplicatedDocsStream = session.Advanced.Stream<dynamic>(destStats.LastReplicatedEtag))
-					{
-						do
-						{
-							var entityName = string.Empty;
-							RavenJToken val;
-							if (unReplicatedDocsStream.Current.Metadata.TryGetValue(Constants.RavenEntityName, out val))
-								entityName = val.Value<string>();
+					DefaultDatabase = args[1],
+					Url = args[0]
+				})
+				{
+					store.Initialize();
+					var unreplicatedDocs = new List<DocumentInfoRow>();
 
-							unreplicatedDocs.Add(new DocumentInfoRow
+					var lastDocEtag = store.DatabaseCommands.GetStatistics().LastDocEtag;
+					var replicationStats = store.DatabaseCommands.Info.GetReplicationInfo();
+					foreach (var destStats in replicationStats.Stats)
+					{
+						if (EtagUtil.IsGreaterThan(destStats.LastReplicatedEtag, lastDocEtag))
+							continue;
+						using (var session = store.OpenSession())
+						using (var unReplicatedDocsStream = session.Advanced.Stream<dynamic>(destStats.LastReplicatedEtag))
+						{
+							while (unReplicatedDocsStream.MoveNext())
 							{
-								Id = unReplicatedDocsStream.Current.Key,
-								Etag = unReplicatedDocsStream.Current.Etag.ToString(),
-								EntityName = entityName,
-								DestinationUrl = destStats.Url
-							});
-							Console.WriteLine($"Doc Id = {unReplicatedDocsStream.Current.Key}, Destination = {destStats.Url}");
-						} while (unReplicatedDocsStream.MoveNext());
+								if(unReplicatedDocsStream.Current.Key.StartsWith("Raven/") ||
+									unReplicatedDocsStream.Current == null) //precaution
+									continue;
+								
+								var entityName = string.Empty;
+								RavenJToken val;
+								if (unReplicatedDocsStream.Current.Metadata.TryGetValue(Constants.RavenEntityName, out val))
+									entityName = val.Value<string>();
+
+								unreplicatedDocs.Add(new DocumentInfoRow
+								{
+									Id = unReplicatedDocsStream.Current.Key,
+									Etag = unReplicatedDocsStream.Current.Etag.ToString(),
+									EntityName = entityName,
+									DestinationUrl = destStats.Url
+								});
+								Console.WriteLine($"Doc Id = {unReplicatedDocsStream.Current.Key}, Destination = {destStats.Url}");
+							}
+						}
+					}
+
+					Console.Clear();
+					Console.WriteLine($"Writing exported data to {store.DefaultDatabase}.csv");
+					using (var sw = new StreamWriter($"{store.DefaultDatabase}.csv", false))
+					{
+						foreach (var row in unreplicatedDocs)
+							CsvSerializer.SerializeToWriter(row, sw);
+						sw.Flush();
 					}
 				}
-
-				using (var sw = new StreamWriter($"{store.DefaultDatabase}.csv", false))
-				{
-					foreach(var row in unreplicatedDocs)
-						CsvSerializer.SerializeToWriter(row,sw);
-					sw.Flush();
-				}
+			}
+			catch (Exception e)
+			{
+				Console.WriteLine($"Failed to export not-yet-replicated documents. Reason: {e}");
 			}
 		}
 
