@@ -5,9 +5,11 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using Raven.Abstractions.Data;
+using Raven.Abstractions.Replication;
 using Raven.Abstractions.Util;
 using Raven.Client.Document;
 using Raven.Json.Linq;
+using ServiceStack;
 using ServiceStack.Text;
 
 namespace Raven.NotYetReplicatedExporter
@@ -65,42 +67,52 @@ namespace Raven.NotYetReplicatedExporter
 				})
 				{
 					store.Initialize();
-					var unreplicatedDocs = new List<DocumentInfoRow>();
 
 					var lastDocEtag = store.DatabaseCommands.GetStatistics().LastDocEtag;
-					var replicationStats = store.DatabaseCommands.Info.GetReplicationInfo();
+					var replicationStats = store.DatabaseCommands.Info.GetReplicationInfo();					
+					int count = 0;
+					string dbId;
+					using (var session = store.OpenSession())
+					{
+						var destinationsDoc = session.Load<ReplicationDocument>("Raven/Replication/Destinations");
+						dbId = destinationsDoc.Source;
+					}
+
 					using (var sw = new StreamWriter($"Not-yet-replicated-at-{store.DefaultDatabase}.csv", false))
 					{
 						foreach (var destStats in replicationStats.Stats)
 						{
-							if (EtagUtil.IsGreaterThan(destStats.LastReplicatedEtag, lastDocEtag))
+							var replicationInformation = GetReplicationInformation(destStats.Url, args[0], dbId);
+							if (EtagUtil.IsGreaterThan(Etag.Parse(replicationInformation.LastDocumentEtag), lastDocEtag))
 								continue;
 							using (var session = store.OpenSession())
 							using (var unReplicatedDocsStream = session.Advanced.Stream<dynamic>(destStats.LastReplicatedEtag))
 							{
+								CsvConfig<DocumentInfoRow>.OmitHeaders = true;
 								while (unReplicatedDocsStream.MoveNext())
 								{
 									if (unReplicatedDocsStream.Current.Key.StartsWith("Raven/") ||
-									    unReplicatedDocsStream.Current == null) //precaution
+										unReplicatedDocsStream.Current == null) //precaution
 										continue;
 
 									var entityName = string.Empty;
 									RavenJToken val;
 									if (unReplicatedDocsStream.Current.Metadata.TryGetValue(Constants.RavenEntityName, out val))
-										entityName = val.Value<string>();									
-									unreplicatedDocs.Add(new DocumentInfoRow
+										entityName = val.Value<string>();
+
+									Console.WriteLine($"Doc Id = {unReplicatedDocsStream.Current.Key}, Destination = {destStats.Url}");
+									CsvWriter<DocumentInfoRow>.WriteObjectRow(sw, new DocumentInfoRow
 									{
 										Id = unReplicatedDocsStream.Current.Key,
 										Etag = unReplicatedDocsStream.Current.Etag.ToString(),
 										EntityName = entityName,
 										DestinationUrl = destStats.Url
 									});
-									Console.WriteLine($"Doc Id = {unReplicatedDocsStream.Current.Key}, Destination = {destStats.Url}");
+									if (count++ % 1000 == 0)
+										sw.Flush();
 								}
 							}
 						}
-
-						CsvWriter<DocumentInfoRow>.Write(sw, unreplicatedDocs);
 						sw.Flush();
 					}
 				}
@@ -111,5 +123,45 @@ namespace Raven.NotYetReplicatedExporter
 			}
 		}
 
+		private static SourceReplicationInformationWithBatchInformation GetReplicationInformation(string destinationUrl, string sourceUrl, string sourceDbId)
+		{
+			var client = new JsonHttpClient(destinationUrl);
+			var result =
+				client.Get<SourceReplicationInformationWithBatchInformation>($"/replication/lastEtag?from={sourceUrl}&dbid={sourceDbId}");
+			return result;
+		}
 	}
+
+	public class SourceReplicationInformation
+	{
+		public string LastDocumentEtag { get; set; }
+
+		[Obsolete("Use RavenFS instead.")]
+		public string LastAttachmentEtag { get; set; }
+
+		public Guid ServerInstanceId { get; set; }
+
+		public string Source { get; set; }
+
+		public DateTime? LastModified { get; set; }
+
+		public int? LastBatchSize { get; set; }
+
+		public override string ToString()
+		{
+			return string.Format("LastDocumentEtag: {0}, LastAttachmentEtag: {1}", LastDocumentEtag, LastAttachmentEtag);
+		}
+
+		public SourceReplicationInformation()
+		{
+			LastDocumentEtag = Etag.Empty.ToString();
+			LastAttachmentEtag = Etag.Empty.ToString();
+		}
+	}
+
+	public class SourceReplicationInformationWithBatchInformation : SourceReplicationInformation
+	{
+		public int? MaxNumberOfItemsToReceiveInSingleBatch { get; set; }
+	}
+
 }
