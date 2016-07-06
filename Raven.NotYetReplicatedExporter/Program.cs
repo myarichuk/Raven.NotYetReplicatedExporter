@@ -69,26 +69,26 @@ namespace Raven.NotYetReplicatedExporter
 					store.Initialize();
 
 					var lastDocEtag = store.DatabaseCommands.GetStatistics().LastDocEtag;
-					var replicationStats = store.DatabaseCommands.Info.GetReplicationInfo();					
 					int count = 0;
-					string dbId;
+					ReplicationDocument destinationsDoc;
 					using (var session = store.OpenSession())
 					{
-						var destinationsDoc = session.Load<ReplicationDocument>("Raven/Replication/Destinations");
-						dbId = destinationsDoc.Source;
+						destinationsDoc = session.Load<ReplicationDocument>("Raven/Replication/Destinations");						
 					}
-
+					
 					using (var sw = new StreamWriter($"Not-yet-replicated-at-{store.DefaultDatabase}.csv", false))
 					{
-						foreach (var destStats in replicationStats.Stats)
+						foreach (var dest in destinationsDoc.Destinations)
 						{
-							var replicationInformation = GetReplicationInformation(destStats.Url, args[0], dbId);
-							if (EtagUtil.IsGreaterThan(Etag.Parse(replicationInformation.LastDocumentEtag), lastDocEtag))
+							var replicationInformation = GetReplicationInformation($"{dest.Url}/databases/{dest.Database}", args[0], destinationsDoc.Source);
+							var lastReplicatedEtag = Etag.Parse(replicationInformation.LastDocumentEtag);
+							if (EtagUtil.IsGreaterThan(lastReplicatedEtag, lastDocEtag))
 								continue;
 							using (var session = store.OpenSession())
-							using (var unReplicatedDocsStream = session.Advanced.Stream<dynamic>(destStats.LastReplicatedEtag))
+							using (var unReplicatedDocsStream = session.Advanced.Stream<dynamic>(lastReplicatedEtag))
 							{
-								CsvConfig<DocumentInfoRow>.OmitHeaders = true;
+								
+									
 								while (unReplicatedDocsStream.MoveNext())
 								{
 									if (unReplicatedDocsStream.Current.Key.StartsWith("Raven/") ||
@@ -100,14 +100,15 @@ namespace Raven.NotYetReplicatedExporter
 									if (unReplicatedDocsStream.Current.Metadata.TryGetValue(Constants.RavenEntityName, out val))
 										entityName = val.Value<string>();
 
-									Console.WriteLine($"Doc Id = {unReplicatedDocsStream.Current.Key}, Destination = {destStats.Url}");
+									Console.WriteLine($"Doc Id = {unReplicatedDocsStream.Current.Key}, Destination = {dest.Url}");
 									CsvWriter<DocumentInfoRow>.WriteObjectRow(sw, new DocumentInfoRow
 									{
 										Id = unReplicatedDocsStream.Current.Key,
 										Etag = unReplicatedDocsStream.Current.Etag.ToString(),
 										EntityName = entityName,
-										DestinationUrl = destStats.Url
+										DestinationUrl = dest.Url
 									});
+									CsvConfig<DocumentInfoRow>.OmitHeaders = true;
 									if (count++ % 1000 == 0)
 										sw.Flush();
 								}
